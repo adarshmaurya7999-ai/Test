@@ -2,6 +2,7 @@ const http = require('http');
 const url = require('url');
 const logicError = require('./logic_error');
 const runtimeError = require('./runtime_error');
+const midLevelError = require('./mid_level_error');
 
 const PORT = process.env.PORT || 3000;
 
@@ -48,7 +49,13 @@ const server = http.createServer((req, res) => {
           "/api/runtime/type-error": "GET - Triggers a TypeError (reading property of undefined) causing a crash/500.",
           "/api/runtime/unhandled-rejection": "GET - Rejects a promise without a catch block.",
           "/api/runtime/leak": "GET - Appends a large chunk of dummy data to a global store, causing memory bloat.",
-          "/api/status-bug": "DELETE - Deletes a resource but returns 500 status code despite success, or vice-versa."
+          "/api/status-bug": "DELETE - Deletes a resource but returns 500 status code despite success, or vice-versa.",
+          "/api/mid/validation": "POST - Validates user details. Returns 422 Unprocessable Entity with error list on failure.",
+          "/api/mid/auth": "GET - Evaluates token. Returns 401 Unauthorized or 403 Forbidden based on Authorization header.",
+          "/api/mid/rate-limit": "GET - Simulates rate limiting. Returns 429 Too Many Requests every 3rd call.",
+          "/api/mid/conflict": "POST - Simulates optimistic locking conflicts. Returns 409 Conflict if submission version is mismatch.",
+          "/api/mid/gone": "GET - Returns 410 Gone simulating deleted/decommissioned resources.",
+          "/api/mid/redirect": "GET - Returns 307 Temporary Redirect pointing back to home page."
         }
       });
     }
@@ -128,6 +135,94 @@ const server = http.createServer((req, res) => {
         status: "success",
         message: "Resource deleted successfully, but server returned 500 Internal Server Error status code by mistake!"
       });
+    }
+
+    // --- Mid-Level HTTP Errors ---
+
+    if (path === '/api/mid/validation' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body || '{}');
+          const validationErrors = midLevelError.validateUserData(data);
+          if (validationErrors.length > 0) {
+            return sendJSON(422, {
+              error: "Unprocessable Entity",
+              message: "Validation failed for user creation request.",
+              details: validationErrors
+            });
+          }
+          return sendJSON(201, { success: true, user: data });
+        } catch (e) {
+          return sendJSON(400, { error: "Bad Request", message: "Invalid JSON format" });
+        }
+      });
+      return;
+    }
+
+    if (path === '/api/mid/auth' && req.method === 'GET') {
+      const authHeader = req.headers['authorization'];
+      const authResult = midLevelError.verifyAuthToken(authHeader);
+      if (authResult.status) {
+        return sendJSON(authResult.status, {
+          error: authResult.status === 401 ? "Unauthorized" : "Forbidden",
+          message: authResult.error
+        });
+      }
+      return sendJSON(200, { message: "Authenticated successfully", token: authHeader });
+    }
+
+    if (path === '/api/mid/rate-limit' && req.method === 'GET') {
+      const result = midLevelError.checkRateLimit();
+      if (result.status === 429) {
+        res.setHeader('Retry-After', result.retryAfter.toString());
+        return sendJSON(429, {
+          error: "Too Many Requests",
+          message: result.error,
+          retryAfterSeconds: result.retryAfter
+        });
+      }
+      return sendJSON(200, { message: "Request accepted", stats: result });
+    }
+
+    if (path === '/api/mid/conflict' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const version = payload.version;
+          const result = midLevelError.updateResource(version);
+          if (result.status === 409) {
+            return sendJSON(409, {
+              error: "Conflict",
+              message: result.error,
+              currentVersion: result.currentVersion
+            });
+          }
+          return sendJSON(200, { message: "Update successful", newVersion: result.newVersion });
+        } catch (e) {
+          return sendJSON(400, { error: "Bad Request", message: "Invalid JSON format" });
+        }
+      });
+      return;
+    }
+
+    if (path === '/api/mid/gone' && req.method === 'GET') {
+      return sendJSON(410, {
+        error: "Gone",
+        message: "The requested resource has been permanently deleted and is no longer available at this address."
+      });
+    }
+
+    if (path === '/api/mid/redirect' && req.method === 'GET') {
+      res.writeHead(307, {
+        'Location': '/',
+        'Content-Type': 'text/plain'
+      });
+      res.end("Redirecting to Home...");
+      return;
     }
 
     // Default 404 Route
